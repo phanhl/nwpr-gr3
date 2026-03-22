@@ -1,4 +1,4 @@
-// pubsub_server.c
+// pubsub_server_logged.c
 // C2: Publish-Subscribe Notification Server (TCP)
 // Message framing: delimiter-based (each message is one line terminated by \n)
 //
@@ -12,7 +12,7 @@
 //   TOPICS (list topics + subscriber count)
 //
 // Build:
-//   gcc -O2 -Wall -Wextra -pedantic -std=c11 -D_POSIX_C_SOURCE=200809L pubsub_server.c -o server
+// gcc -O2 -Wall -Wextra -pedantic -std=c11 -D_POSIX_C_SOURCE=200809L pubsub_server_logged.c -o server
 
 #define _POSIX_C_SOURCE 200809L
 
@@ -40,22 +40,23 @@ typedef struct StrNode {
 } StrNode;
 
 typedef struct Msg {
-    char *line;           // already framed with \n
-    time_t expire_at;     // message expires at this time
+    char *line;              // already framed with \n
+    time_t expire_at;        // message expires at this time
     struct Msg *next;
 } Msg;
 
 typedef struct Client {
-    char *id;             // logical identity (for reconnect/offline queue). must be set by ID command
-    int fd;               // >=0 if online; -1 if offline
+    char *id;                // logical identity (for reconnect/offline queue). must be set by ID command
+    int fd;                  // >=0 if online; -1 if offline
+    int client_no;           // connection sequence number for logging: Client 1, Client 2, ...
 
     // Input buffer only used while online
     char inbuf[MAX_LINE];
     size_t inlen;
 
     // Subscriptions
-    StrNode *exact_subs;  // exact topics: e.g. "sport"
-    StrNode *wild_subs;   // wildcard prefixes (store prefix without '*'): e.g. "sport." for "sport.*"
+    StrNode *exact_subs;     // exact topics: e.g. "sport"
+    StrNode *wild_subs;      // wildcard prefixes (store prefix without '*'): e.g. "sport." for "sport.*"
 
     // Offline queue
     Msg *q_head;
@@ -70,8 +71,9 @@ typedef struct Topic {
     struct Topic *next;
 } Topic;
 
-static Client *g_clients = NULL; // list of all known clients (online + offline)
-static Topic *g_topics = NULL;   // list of known topic names (created on subscribe/publish)
+static Client *g_clients = NULL;      // list of all known clients (online + offline)
+static Topic *g_topics = NULL;        // list of known topic names (created on subscribe/publish)
+static int g_next_client_no = 1;
 
 // ----------------- Utilities -----------------
 
@@ -188,7 +190,6 @@ static int queue_prune_expired(Client *c, time_t now) {
         removed++;
     }
 
-    // If there were expired messages in the middle, we can prune with a full scan
     Msg *prev = c->q_head;
     if (!prev) return removed;
 
@@ -254,7 +255,6 @@ static Client *client_find_by_id(const char *id) {
 }
 
 static int is_valid_id(const char *id) {
-    // Keep it simple: letters/digits/_/-. and 1..32
     if (!id) return 0;
     size_t n = strlen(id);
     if (n == 0 || n > 32) return 0;
@@ -274,6 +274,7 @@ static Client *client_create_unidentified(int fd) {
     Client *c = (Client *)calloc(1, sizeof(Client));
     if (!c) die("calloc");
     c->fd = fd;
+    c->client_no = g_next_client_no++;
     c->next = g_clients;
     g_clients = c;
     return c;
@@ -312,10 +313,9 @@ static void client_remove_from_global(Client *victim) {
 }
 
 static int wildcard_to_prefix(const char *topic_or_wild, char *out_prefix, size_t out_sz) {
-    // Accept only "prefix*" wildcard, ideally "sport.*". We store prefix without '*'.
     const char *star = strchr(topic_or_wild, '*');
     if (!star) return 0;
-    if (star[1] != '\0') return -1; // only allow '*' at the end
+    if (star[1] != '\0') return -1;
 
     size_t prefix_len = (size_t)(star - topic_or_wild);
     if (prefix_len == 0) return -1;
@@ -329,7 +329,6 @@ static int wildcard_to_prefix(const char *topic_or_wild, char *out_prefix, size_
 static int client_matches_topic(const Client *c, const char *topic) {
     if (strlist_contains(c->exact_subs, topic)) return 1;
 
-    // Wildcard: any prefix matches
     for (StrNode *n = c->wild_subs; n; n = n->next) {
         size_t plen = strlen(n->s);
         if (strncmp(topic, n->s, plen) == 0) return 1;
@@ -351,30 +350,28 @@ static int topic_subscriber_count(const char *topic) {
 
 static void cmd_help(int fd) {
     send_line(fd, "OK Commands:\n");
-    send_line(fd, "  ID <client_id>\n");
-    send_line(fd, "  SUBSCRIBE <topic>\n");
-    send_line(fd, "  SUBSCRIBE <prefix*>   (example: sport.*)\n");
-    send_line(fd, "  UNSUBSCRIBE <topic|prefix*>\n");
-    send_line(fd, "  PUBLISH <topic> <message>\n");
-    send_line(fd, "  TOPICS\n");
+    send_line(fd, " ID <client_id>\n");
+    send_line(fd, " SUBSCRIBE <topic>\n");
+    send_line(fd, " SUBSCRIBE <prefix*> (example: sport.*)\n");
+    send_line(fd, " UNSUBSCRIBE <topic|prefix*>\n");
+    send_line(fd, " PUBLISH <topic> <message>\n");
+    send_line(fd, " TOPICS\n");
 }
 
 static void cmd_id(int fd, const char *id) {
     if (!id || !is_valid_id(id)) {
-        send_line(fd, "ERR Usage: ID <client_id>  (1..32 chars: a-zA-Z0-9_.-)\n");
+        send_line(fd, "ERR Usage: ID <client_id> (1..32 chars: a-zA-Z0-9_.-)\n");
         return;
     }
 
     Client *conn = client_find_by_fd(fd);
     if (!conn) return;
 
-    // If this connection already has an ID, prevent changing
     if (conn->id) {
         send_line(fd, "ERR ID already set\n");
         return;
     }
 
-    // If an existing offline record exists, attach to it
     Client *existing = client_find_by_id(id);
     if (existing) {
         if (existing->fd >= 0) {
@@ -382,21 +379,17 @@ static void cmd_id(int fd, const char *id) {
             return;
         }
 
-        // Move the socket fd to the existing client record
         existing->fd = fd;
         existing->inlen = 0;
         existing->inbuf[0] = '\0';
 
-        // Remove the temporary unidentified client node
         client_remove_from_global(conn);
 
-        // Deliver queued messages
         global_prune_expired_queues();
         int delivered = 0;
         for (Msg *m = existing->q_head; m; m = m->next) {
             if (send_line(fd, m->line) == 0) delivered++;
         }
-        // Clear queue after sending
         queue_free(existing->q_head);
         existing->q_head = existing->q_tail = NULL;
 
@@ -406,7 +399,6 @@ static void cmd_id(int fd, const char *id) {
         return;
     }
 
-    // New identity
     conn->id = xstrdup(id);
     char out[MAX_LINE];
     snprintf(out, sizeof(out), "OK Identified as %s\n", id);
@@ -426,7 +418,6 @@ static void cmd_subscribe(int fd, const char *topic_or_wild) {
         return;
     }
 
-    // wildcard?
     char prefix[256];
     int w = wildcard_to_prefix(topic_or_wild, prefix, sizeof(prefix));
     if (w == -1) {
@@ -435,14 +426,16 @@ static void cmd_subscribe(int fd, const char *topic_or_wild) {
     }
     if (w == 1) {
         strlist_add_unique(&c->wild_subs, prefix);
-        // Touch topic namespace by prefix (optional). We won't create all matching topics.
+
         char out[MAX_LINE];
         snprintf(out, sizeof(out), "OK Subscribed (wildcard) to '%s'\n", topic_or_wild);
         send_line(fd, out);
+
+        printf("[server] Client %d subscribed to '%s'\n", c->client_no, topic_or_wild);
+        fflush(stdout);
         return;
     }
 
-    // exact
     strlist_add_unique(&c->exact_subs, topic_or_wild);
     topic_touch(topic_or_wild);
 
@@ -450,6 +443,9 @@ static void cmd_subscribe(int fd, const char *topic_or_wild) {
     char out[MAX_LINE];
     snprintf(out, sizeof(out), "OK Subscribed to '%s'. Subscribers: %d\n", topic_or_wild, cnt);
     send_line(fd, out);
+
+    printf("[server] Client %d subscribed to '%s'\n", c->client_no, topic_or_wild);
+    fflush(stdout);
 }
 
 static void cmd_unsubscribe(int fd, const char *topic_or_wild) {
@@ -509,29 +505,30 @@ static void cmd_publish(int fd, const char *topic, const char *message) {
 
     for (Client *c = g_clients; c; c = c->next) {
         if (!c->id) continue;
-        if (strcmp(c->id, pub->id) == 0) continue; // publisher doesn't receive own message
+        if (strcmp(c->id, pub->id) == 0) continue;
         if (!client_matches_topic(c, topic)) continue;
 
         if (c->fd >= 0) {
             if (send_line(c->fd, payload) == 0) {
                 delivered++;
             } else {
-                // if send fails, mark offline and queue (best effort)
                 client_mark_offline(c);
                 queue_push(c, payload, now + OFFLINE_TTL_SEC);
                 delivered++;
             }
         } else {
-            // offline: queue for up to 60s
             queue_push(c, payload, now + OFFLINE_TTL_SEC);
             delivered++;
         }
     }
 
-    // Requirement: after each PUBLISH, respond "Delivered to N subscribers"
     char out[MAX_LINE];
     snprintf(out, sizeof(out), "Delivered to %d subscribers\n", delivered);
     send_line(fd, out);
+
+    printf("[server] Client %d published to '%s' -> %d subscribers\n",
+           pub->client_no, topic, delivered);
+    fflush(stdout);
 }
 
 static void cmd_topics(int fd) {
@@ -544,7 +541,6 @@ static void cmd_topics(int fd) {
 
     global_prune_expired_queues();
 
-    // Count topics
     int k = 0;
     for (Topic *t = g_topics; t; t = t->next) k++;
 
@@ -565,14 +561,6 @@ static void cmd_topics(int fd) {
 static void handle_line(int fd, char *line) {
     trim_crlf(line);
     if (line[0] == '\0') return;
-
-    // Supported commands:
-    //   ID <client_id>
-    //   SUBSCRIBE <topic|prefix*>
-    //   UNSUBSCRIBE <topic|prefix*>
-    //   PUBLISH <topic> <message...>
-    //   TOPICS
-    //   HELP
 
     char *cmd = strtok(line, " \t");
     if (!cmd) return;
@@ -624,11 +612,15 @@ static int accept_client(int listen_fd) {
     int cfd = accept(listen_fd, (struct sockaddr *)&addr, &alen);
     if (cfd < 0) return -1;
 
+    Client *c = client_create_unidentified(cfd);
+
     char ip[INET_ADDRSTRLEN];
     inet_ntop(AF_INET, &addr.sin_addr, ip, sizeof(ip));
-    fprintf(stderr, "Client connected: %s:%d (fd=%d)\n", ip, ntohs(addr.sin_port), cfd);
 
-    (void)client_create_unidentified(cfd);
+    printf("[server] Client %d connected from %s:%d (fd %d)\n",
+           c->client_no, ip, ntohs(addr.sin_port), cfd);
+    fflush(stdout);
+
     send_line(cfd, "OK Connected. Please identify: ID <client_id>\n");
     return cfd;
 }
@@ -640,15 +632,14 @@ static void on_disconnect_fd(int fd) {
         return;
     }
 
-    fprintf(stderr, "Client disconnected fd=%d id=%s\n", fd, c->id ? c->id : "(unidentified)");
+    printf("[server] Client %d disconnected (fd %d)\n", c->client_no, fd);
+    fflush(stdout);
 
     if (!c->id) {
-        // Unidentified temporary connection: remove fully
         client_remove_from_global(c);
         return;
     }
 
-    // Mark offline but keep subscriptions & queue for reconnect
     client_mark_offline(c);
 }
 
@@ -669,10 +660,8 @@ static void read_from_client(int fd) {
         return;
     }
 
-    // Append and split by '\n'
     for (ssize_t i = 0; i < n; i++) {
         if (c->inlen + 1 >= sizeof(c->inbuf)) {
-            // line too long; reset buffer
             c->inlen = 0;
             c->inbuf[0] = '\0';
             send_line(fd, "ERR Line too long\n");
@@ -726,7 +715,8 @@ int main(int argc, char **argv) {
     if (bind(listen_fd, (struct sockaddr *)&addr, sizeof(addr)) < 0) die("bind");
     if (listen(listen_fd, BACKLOG) < 0) die("listen");
 
-    fprintf(stderr, "PubSub server listening on port %d\n", port);
+    printf("=== Pub/Sub Server listening on port %d ===\n", port);
+    fflush(stdout);
 
     while (1) {
         fd_set rfds;
@@ -734,7 +724,6 @@ int main(int argc, char **argv) {
         FD_SET(listen_fd, &rfds);
         int maxfd = listen_fd;
 
-        // Add all ONLINE client fds
         for (Client *c = g_clients; c; c = c->next) {
             if (c->fd >= 0) {
                 FD_SET(c->fd, &rfds);
@@ -752,7 +741,6 @@ int main(int argc, char **argv) {
             (void)accept_client(listen_fd);
         }
 
-        // Collect ready fds first (because handler may modify state)
         int ready_fds[FD_SETSIZE];
         int ready_n = 0;
         for (Client *c = g_clients; c; c = c->next) {
