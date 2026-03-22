@@ -1,4 +1,4 @@
-// pubsub_server_logged.c
+// server.c
 // C2: Publish-Subscribe Notification Server (TCP)
 // Message framing: delimiter-based (each message is one line terminated by \n)
 //
