@@ -28,14 +28,14 @@ This system runs across **3 separate machines** connected in the same network:
 ## Run
 
 ```bash
-# Machine 1 — start the server (port 9000 is hardcoded)
-./server
+# Machine 1 — start the server 
+./server 9000
 
 # Machine 2 — start Client A (connect to server's IP)
-./client <IP_Machine_1>
+./client <IP_Machine_1> 9000
 
 # Machine 3 — start Client B (connect to server's IP)
-./client <IP_Machine_1>
+./client <IP_Machine_1> 9000
 ```
 
 ## Commands
@@ -63,7 +63,7 @@ $ ./server
 [server] Client 1 published to 'weather' -> 0 subscribers
 
 === Machine 2: Client A (publisher) ===
-$ ./client <IP_Machine_1>
+$ ./client <IP_Machine_1> 9000
 Connected to <IP_Machine_1>:9000
 WELCOME 1
 > PUBLISH news Breaking: system works!
@@ -79,7 +79,7 @@ Topics:
   weather (0 subscribers)
 
 === Machine 3: Client B (subscriber) ===
-$ ./client <IP_Machine_1>
+$ ./client <IP_Machine_1> 9000
 Connected to <IP_Machine_1>:9000
 WELCOME 2
 > SUBSCRIBE news
