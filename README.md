@@ -46,7 +46,7 @@ This system runs across **3 separate machines** connected in the same network:
 | `UNSUBSCRIBE <topic>` | Remove a subscription |
 | `PUBLISH <topic> <message>` | Send a message to all subscribers of `<topic>` |
 | `TOPICS` | List known topics with subscriber counts |
-| `QUIT` / `EXIT` | Disconnect from the server |
+| `Ctrl + c` | Disconnect from the server |
 
 ## Example Interaction
 
