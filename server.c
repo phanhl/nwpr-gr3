@@ -12,7 +12,7 @@
 //   TOPICS (list topics + subscriber count)
 //
 // Build:
-// gcc -O2 -Wall -Wextra -pedantic -std=c11 -D_POSIX_C_SOURCE=200809L pubsub_server_logged.c -o server
+// gcc -O2 -Wall -Wextra -pedantic -std=c11 -D_POSIX_C_SOURCE=200809L server.c -o server
 
 #define _POSIX_C_SOURCE 200809L
 

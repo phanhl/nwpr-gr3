@@ -3,7 +3,7 @@
 // Message framing: delimiter-based (each message is one line terminated by \n)
 //
 // Build:
-//   gcc -O2 -Wall -Wextra -pedantic -std=c11 -D_POSIX_C_SOURCE=200809L pubsub_client.c -o client
+//   gcc -O2 -Wall -Wextra -pedantic -std=c11 -D_POSIX_C_SOURCE=200809L client.c -o client
 
 #define _POSIX_C_SOURCE 200809L
 
