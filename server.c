@@ -25,6 +25,7 @@
 #include <sys/select.h>
 #include <sys/socket.h>
 #include <sys/types.h>
+#include <signal.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -76,12 +77,13 @@ static Topic *g_topics = NULL;        // list of known topic names (created on s
 static int g_next_client_no = 1;
 
 // ----------------- Utilities -----------------
-
+//Mục đích: In thông báo lỗi hệ thống rồi thoát chương trình.
 static void die(const char *msg) {
     perror(msg);
     exit(1);
 }
 
+//Mục đích: Sao chép chuỗi s vào bộ nhớ mới cấp phát. Nếu thất bại, in lỗi và thoát.
 static char *xstrdup(const char *s) {
     size_t n = strlen(s);
     char *p = (char *)malloc(n + 1);
@@ -90,6 +92,7 @@ static char *xstrdup(const char *s) {
     return p;
 }
 
+//Mục đích: Gửi toàn bộ dữ liệu từ buf đến fd. Lặp lại nếu bị ngắt bởi tín hiệu (EINTR).
 static int send_all(int fd, const char *buf, size_t len) {
     size_t off = 0;
     while (off < len) {
@@ -104,10 +107,12 @@ static int send_all(int fd, const char *buf, size_t len) {
     return 0;
 }
 
+//Mục đích: Gửi một dòng (kết thúc bằng \n) đến fd.
 static int send_line(int fd, const char *line) {
     return send_all(fd, line, strlen(line));
 }
 
+//Mục đích: Xóa ký tự xuống dòng (\n hoặc \r\n) ở cuối chuỗi s.
 static void trim_crlf(char *s) {
     size_t n = strlen(s);
     while (n > 0 && (s[n - 1] == '\n' || s[n - 1] == '\r')) {
@@ -116,6 +121,7 @@ static void trim_crlf(char *s) {
     }
 }
 
+//Mục đích: Kiểm tra xem chuỗi s có tồn tại trong danh sách liên kết StrNode hay không.
 static int strlist_contains(StrNode *n, const char *s) {
     for (; n; n = n->next) {
         if (strcmp(n->s, s) == 0) return 1;
@@ -123,6 +129,7 @@ static int strlist_contains(StrNode *n, const char *s) {
     return 0;
 }
 
+//Mục đích: Thêm chuỗi s vào đầu danh sách (nếu chưa có). Tránh trùng lặp.
 static void strlist_add_unique(StrNode **head, const char *s) {
     if (strlist_contains(*head, s)) return;
     StrNode *n = (StrNode *)calloc(1, sizeof(StrNode));
@@ -132,6 +139,7 @@ static void strlist_add_unique(StrNode **head, const char *s) {
     *head = n;
 }
 
+//Mục đích: Xóa chuỗi s khỏi danh sách. Duyệt qua danh sách để tìm và xóa.
 static void strlist_remove(StrNode **head, const char *s) {
     StrNode **pp = head;
     while (*pp) {
@@ -146,6 +154,7 @@ static void strlist_remove(StrNode **head, const char *s) {
     }
 }
 
+//Mục đích: Giải phóng bộ nhớ của danh sách liên kết StrNode.
 static void strlist_free(StrNode *n) {
     while (n) {
         StrNode *next = n->next;
@@ -155,6 +164,7 @@ static void strlist_free(StrNode *n) {
     }
 }
 
+//Mục đích: Giải phóng bộ nhớ của hàng đợi tin nhắn.
 static void queue_free(Msg *m) {
     while (m) {
         Msg *next = m->next;
@@ -164,6 +174,7 @@ static void queue_free(Msg *m) {
     }
 }
 
+//Mục đích: Thêm một tin nhắn vào cuối hàng đợi của client.
 static void queue_push(Client *c, const char *line, time_t expire_at) {
     Msg *m = (Msg *)calloc(1, sizeof(Msg));
     if (!m) die("calloc");
@@ -178,6 +189,7 @@ static void queue_push(Client *c, const char *line, time_t expire_at) {
     }
 }
 
+//Mục đích: Xóa các tin nhắn đã hết hạn trong hàng đợi của client.
 static int queue_prune_expired(Client *c, time_t now) {
     int removed = 0;
 
@@ -211,6 +223,7 @@ static int queue_prune_expired(Client *c, time_t now) {
     return removed;
 }
 
+//Mục đích: Duyệt qua tất cả các client và xóa các tin nhắn đã hết hạn trong hàng đợi của họ.
 static void global_prune_expired_queues(void) {
     time_t now = time(NULL);
     for (Client *c = g_clients; c; c = c->next) {
@@ -218,6 +231,7 @@ static void global_prune_expired_queues(void) {
     }
 }
 
+//Mục đích: Tìm một topic trong danh sách các topic toàn cục.
 static Topic *topic_find(const char *name) {
     for (Topic *t = g_topics; t; t = t->next) {
         if (strcmp(t->name, name) == 0) return t;
@@ -225,6 +239,7 @@ static Topic *topic_find(const char *name) {
     return NULL;
 }
 
+//Mục đích: Cập nhật thời gian "last_seen" của một topic hoặc tạo mới nếu chưa có.
 static void topic_touch(const char *name) {
     Topic *t = topic_find(name);
     if (t) {
@@ -240,6 +255,7 @@ static void topic_touch(const char *name) {
     g_topics = t;
 }
 
+//Mục đích: Tìm một client dựa trên file descriptor.
 static Client *client_find_by_fd(int fd) {
     for (Client *c = g_clients; c; c = c->next) {
         if (c->fd == fd) return c;
@@ -247,6 +263,7 @@ static Client *client_find_by_fd(int fd) {
     return NULL;
 }
 
+//Mục đích: Tìm một client dựa trên ID.
 static Client *client_find_by_id(const char *id) {
     for (Client *c = g_clients; c; c = c->next) {
         if (c->id && strcmp(c->id, id) == 0) return c;
@@ -254,6 +271,7 @@ static Client *client_find_by_id(const char *id) {
     return NULL;
 }
 
+//Mục đích: Kiểm tra tính hợp lệ của ID (không rỗng, tối đa 32 ký tự, chỉ chứa chữ cái, số, _, -, .).
 static int is_valid_id(const char *id) {
     if (!id) return 0;
     size_t n = strlen(id);
@@ -270,6 +288,7 @@ static int is_valid_id(const char *id) {
     return 1;
 }
 
+//Mục đích: Tạo một client mới chưa có ID và thêm vào danh sách toàn cục.
 static Client *client_create_unidentified(int fd) {
     Client *c = (Client *)calloc(1, sizeof(Client));
     if (!c) die("calloc");
@@ -280,6 +299,7 @@ static Client *client_create_unidentified(int fd) {
     return c;
 }
 
+//Mục đích: Đánh dấu một client là offline (đóng kết nối, xóa buffer).
 static void client_mark_offline(Client *c) {
     if (!c) return;
     if (c->fd >= 0) {
@@ -290,6 +310,7 @@ static void client_mark_offline(Client *c) {
     c->inbuf[0] = '\0';
 }
 
+//Mục đích: Giải phóng bộ nhớ của một client.
 static void client_destroy(Client *c) {
     if (!c) return;
     if (c->fd >= 0) close(c->fd);
@@ -300,6 +321,7 @@ static void client_destroy(Client *c) {
     free(c);
 }
 
+//Mục đích: Xóa một client khỏi danh sách toàn cục và giải phóng bộ nhớ của nó.
 static void client_remove_from_global(Client *victim) {
     Client **pp = &g_clients;
     while (*pp) {
@@ -312,6 +334,7 @@ static void client_remove_from_global(Client *victim) {
     }
 }
 
+//Mục đích: Chuyển đổi một topic có wildcard (ví dụ: "sport.*") thành prefix (ví dụ: "sport.").
 static int wildcard_to_prefix(const char *topic_or_wild, char *out_prefix, size_t out_sz) {
     const char *star = strchr(topic_or_wild, '*');
     if (!star) return 0;
@@ -326,6 +349,7 @@ static int wildcard_to_prefix(const char *topic_or_wild, char *out_prefix, size_
     return 1;
 }
 
+//Mục đích: Kiểm tra xem một client có khớp với một topic hay không (dựa trên các đăng ký exact và wildcard).
 static int client_matches_topic(const Client *c, const char *topic) {
     if (strlist_contains(c->exact_subs, topic)) return 1;
 
@@ -337,6 +361,7 @@ static int client_matches_topic(const Client *c, const char *topic) {
     return 0;
 }
 
+//Mục đích: Đếm số lượng client đang đăng ký topic này (bao gồm cả wildcard).
 static int topic_subscriber_count(const char *topic) {
     int cnt = 0;
     for (Client *c = g_clients; c; c = c->next) {
@@ -347,7 +372,7 @@ static int topic_subscriber_count(const char *topic) {
 }
 
 // ----------------- Command handlers -----------------
-
+//Mục đích: Gửi danh sách lệnh hỗ trợ cho client.
 static void cmd_help(int fd) {
     send_line(fd, "OK Commands:\n");
     send_line(fd, " ID <client_id>\n");
@@ -357,7 +382,7 @@ static void cmd_help(int fd) {
     send_line(fd, " PUBLISH <topic> <message>\n");
     send_line(fd, " TOPICS\n");
 }
-
+//Mục đích: Xử lý lệnh ID <client_id>. Đây là hàm phức tạp nhất.
 static void cmd_id(int fd, const char *id) {
     if (!id || !is_valid_id(id)) {
         send_line(fd, "ERR Usage: ID <client_id> (1..32 chars: a-zA-Z0-9_.-)\n");
@@ -383,6 +408,7 @@ static void cmd_id(int fd, const char *id) {
         existing->inlen = 0;
         existing->inbuf[0] = '\0';
 
+        conn->fd = -1;  // Tránh client_destroy đóng nhầm fd vừa gán cho existing
         client_remove_from_global(conn);
 
         global_prune_expired_queues();
@@ -405,6 +431,7 @@ static void cmd_id(int fd, const char *id) {
     send_line(fd, out);
 }
 
+//Mục đích: Xử lý lệnh SUBSCRIBE <topic>.
 static void cmd_subscribe(int fd, const char *topic_or_wild) {
     if (!topic_or_wild || topic_or_wild[0] == '\0') {
         send_line(fd, "ERR Usage: SUBSCRIBE <topic>\n");
@@ -447,7 +474,7 @@ static void cmd_subscribe(int fd, const char *topic_or_wild) {
     printf("[server] Client %d subscribed to '%s'\n", c->client_no, topic_or_wild);
     fflush(stdout);
 }
-
+//Mục đích: Xử lý lệnh UNSUBSCRIBE. Ngược lại với cmd_subscribe — xóa topic khỏi danh sách subscription.
 static void cmd_unsubscribe(int fd, const char *topic_or_wild) {
     if (!topic_or_wild || topic_or_wild[0] == '\0') {
         send_line(fd, "ERR Usage: UNSUBSCRIBE <topic>\n");
@@ -480,7 +507,7 @@ static void cmd_unsubscribe(int fd, const char *topic_or_wild) {
     snprintf(out, sizeof(out), "OK Unsubscribed from '%s'\n", topic_or_wild);
     send_line(fd, out);
 }
-
+//Mục đích: Xử lý lệnh PUBLISH <topic> <message>. Tìm tất cả client đã đăng ký topic này và gửi tin nhắn cho họ.
 static void cmd_publish(int fd, const char *topic, const char *message) {
     if (!topic || topic[0] == '\0' || !message || message[0] == '\0') {
         send_line(fd, "ERR Usage: PUBLISH <topic> <message>\n");
@@ -530,7 +557,7 @@ static void cmd_publish(int fd, const char *topic, const char *message) {
            pub->client_no, topic, delivered);
     fflush(stdout);
 }
-
+//Mục đích: Xử lý lệnh TOPICS. Liệt kê tất cả các topic hiện có và số lượng client đang đăng ký mỗi topic.
 static void cmd_topics(int fd) {
     Client *c = client_find_by_fd(fd);
     if (!c) return;
@@ -558,6 +585,7 @@ static void cmd_topics(int fd) {
 
 // ----------------- Parsing & server loop -----------------
 
+//Mục đích: Xử lý một dòng lệnh nhận được từ client.
 static void handle_line(int fd, char *line) {
     trim_crlf(line);
     if (line[0] == '\0') return;
@@ -606,6 +634,7 @@ static void handle_line(int fd, char *line) {
     send_line(fd, "ERR Unknown command. Type HELP\n");
 }
 
+//Mục đích: Chấp nhận một kết nối mới từ client.
 static int accept_client(int listen_fd) {
     struct sockaddr_in addr;
     socklen_t alen = sizeof(addr);
@@ -625,6 +654,7 @@ static int accept_client(int listen_fd) {
     return cfd;
 }
 
+//Mục đích: Xử lý khi một client ngắt kết nối.
 static void on_disconnect_fd(int fd) {
     Client *c = client_find_by_fd(fd);
     if (!c) {
@@ -643,6 +673,7 @@ static void on_disconnect_fd(int fd) {
     client_mark_offline(c);
 }
 
+//Mục đích: Đọc dữ liệu từ client và xử lý các lệnh.
 static void read_from_client(int fd) {
     Client *c = client_find_by_fd(fd);
     if (!c) return;
@@ -686,6 +717,7 @@ static void read_from_client(int fd) {
     }
 }
 
+//Mục đích: Hàm main chính, khởi tạo server và xử lý vòng lặp sự kiện.
 int main(int argc, char **argv) {
     if (argc != 2) {
         fprintf(stderr, "Usage: %s <port>\n", argv[0]);
@@ -697,6 +729,9 @@ int main(int argc, char **argv) {
         fprintf(stderr, "Invalid port: %s\n", argv[1]);
         return 2;
     }
+
+    // Bỏ qua SIGPIPE: tránh server bị kill khi send() đến client đã disconnect
+    signal(SIGPIPE, SIG_IGN);
 
     int listen_fd = socket(AF_INET, SOCK_STREAM, 0);
     if (listen_fd < 0) die("socket");

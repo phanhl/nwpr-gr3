@@ -38,6 +38,7 @@ static int send_all(int fd, const char *buf, size_t len) {
     return 0;
 }
 
+//Mục đích: Thiết lập kết nối TCP đến server.
 static int connect_tcp(const char *host, const char *port) {
     struct addrinfo hints;
     memset(&hints, 0, sizeof(hints));
@@ -66,6 +67,7 @@ static int connect_tcp(const char *host, const char *port) {
     return fd;
 }
 
+//Mục đích: Gửi lệnh ID đến server nếu có client_id được cung cấp.
 static void maybe_send_id(int fd, const char *id) {
     if (!id) return;
     char line[MAX_LINE];
@@ -73,6 +75,7 @@ static void maybe_send_id(int fd, const char *id) {
     (void)send_all(fd, line, strlen(line));
 }
 
+//Mục đích: Vòng lặp chính client — đồng thời đọc stdin và socket.
 int main(int argc, char **argv) {
     if (argc != 3 && argc != 4) {
         fprintf(stderr, "Usage: %s <host> <port> [client_id]\n", argv[0]);
