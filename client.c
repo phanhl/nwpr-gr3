@@ -93,6 +93,13 @@ int main(int argc, char **argv) {
         maybe_send_id(fd, argv[3]);
     }
 
+    // Use raw read() for stdin to avoid stdio buffering vs select() deadlock.
+    // stdio's fgets() may internally read() more bytes than one line and buffer
+    // them, causing select() to never report stdin as readable again even though
+    // data is available in stdio's internal buffer => terminal hangs.
+    char stdinbuf[MAX_LINE];
+    size_t stdinlen = 0;
+
     char sockbuf[1024];
     char outbuf[MAX_LINE];
     size_t outlen = 0;
@@ -111,25 +118,29 @@ int main(int argc, char **argv) {
         }
 
         if (FD_ISSET(STDIN_FILENO, &rfds)) {
-            char line[MAX_LINE];
-            if (!fgets(line, sizeof(line), stdin)) {
+            char tmp[1024];
+            ssize_t nr = read(STDIN_FILENO, tmp, sizeof(tmp));
+            if (nr <= 0) {
                 fprintf(stderr, "EOF on stdin, exiting.\n");
                 break;
             }
 
-            // Ensure newline framing
-            size_t n = strlen(line);
-            if (n == 0) continue;
-            if (line[n - 1] != '\n') {
-                if (n + 1 < sizeof(line)) {
-                    line[n] = '\n';
-                    line[n + 1] = '\0';
+            for (ssize_t i = 0; i < nr; i++) {
+                if (stdinlen + 1 >= sizeof(stdinbuf)) {
+                    // Line too long, discard
+                    stdinlen = 0;
+                    continue;
                 }
-            }
+                stdinbuf[stdinlen++] = tmp[i];
 
-            if (send_all(fd, line, strlen(line)) < 0) {
-                fprintf(stderr, "Send failed.\n");
-                break;
+                if (tmp[i] == '\n') {
+                    // Complete line ready, send it
+                    if (send_all(fd, stdinbuf, stdinlen) < 0) {
+                        fprintf(stderr, "Send failed.\n");
+                        goto done;
+                    }
+                    stdinlen = 0;
+                }
             }
         }
 
@@ -162,6 +173,7 @@ int main(int argc, char **argv) {
         }
     }
 
+done:
     close(fd);
     return 0;
 }
